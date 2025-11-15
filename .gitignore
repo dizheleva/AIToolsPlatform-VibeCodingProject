@@ -1,0 +1,39 @@
+# Environment files
+.env.local
+.env.production
+
+# Node modules
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# Laravel
+backend/vendor/
+backend/storage/logs/*.log
+backend/storage/framework/cache/*
+backend/storage/framework/sessions/*
+backend/storage/framework/views/*
+backend/bootstrap/cache/*
+
+# Docker
+.docker/
+
+# Database
+*.sql
+backup_*.sql
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

@@ -27,8 +27,20 @@ class UserFactory extends Factory
             'name' => fake()->name(),
             'email' => fake()->unique()->safeEmail(),
             'email_verified_at' => now(),
+            'role' => fake()->randomElement([
+                'owner',
+                'backend',
+                'frontend',
+                'pm',
+                'qa',
+                'designer',
+                'employee',
+            ]),
+            'status' => fake()->randomElement(['approved', 'pending']),
             'password' => static::$password ??= Hash::make('password'),
             'remember_token' => Str::random(10),
+            'two_factor_type' => 'none',
+            'two_factor_enabled' => false,
         ];
     }
 

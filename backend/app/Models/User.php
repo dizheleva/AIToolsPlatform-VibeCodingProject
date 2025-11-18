@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
+use Illuminate\Support\Facades\Hash;
 
 class User extends Authenticatable
 {
@@ -25,6 +26,8 @@ class User extends Authenticatable
         'role',
         'status',
         'password',
+        'email_verified_at',
+        'avatar_url',
         'two_factor_type',
         'two_factor_secret',
         'telegram_chat_id',
@@ -51,10 +54,26 @@ class User extends Authenticatable
     {
         return [
             'email_verified_at' => 'datetime',
-            'password' => 'hashed',
             'two_factor_enabled' => 'boolean',
             'two_factor_verified_at' => 'datetime',
         ];
+    }
+
+    /**
+     * Set the password attribute (hash if not already hashed).
+     *
+     * @param  string  $value
+     * @return void
+     */
+    public function setPasswordAttribute($value): void
+    {
+        // Only hash if the value is not already hashed
+        // Check if the value starts with $2y$ (bcrypt) or $argon2id$ (argon2)
+        if (!empty($value) && !str_starts_with($value, '$2y$') && !str_starts_with($value, '$argon2id$')) {
+            $this->attributes['password'] = Hash::make($value);
+        } else {
+            $this->attributes['password'] = $value;
+        }
     }
 
     /**

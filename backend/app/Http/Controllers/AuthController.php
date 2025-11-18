@@ -9,7 +9,15 @@ use Illuminate\Support\Facades\Hash;
 use App\Models\User;
 use App\Models\AiTool;
 use App\Services\TwoFactorService;
+use App\Http\Requests\LoginRequest;
+use App\Http\Requests\RegisterRequest;
+use App\Http\Requests\ApiLoginRequest;
+use App\Http\Requests\ApiRegisterRequest;
+use App\Http\Requests\UpdateProfileRequest;
+use App\Http\Requests\ChangePasswordRequest;
+use App\Http\Resources\UserResource;
 use Illuminate\Validation\ValidationException;
+use Illuminate\Support\Facades\Storage;
 
 class AuthController extends Controller
 {
@@ -18,13 +26,8 @@ class AuthController extends Controller
         return view('auth.login');
     }
 
-    public function login(Request $request)
+    public function login(LoginRequest $request)
     {
-        $request->validate([
-            'email' => 'required|email',
-            'password' => 'required',
-        ]);
-
         if (Auth::attempt($request->only('email', 'password'), $request->boolean('remember'))) {
             $request->session()->regenerate();
 
@@ -41,15 +44,8 @@ class AuthController extends Controller
         return view('auth.register');
     }
 
-    public function register(Request $request)
+    public function register(RegisterRequest $request)
     {
-        $request->validate([
-            'name' => 'required|string|max:255',
-            'email' => 'required|string|email|max:255|unique:users',
-            'password' => 'required|string|min:8|confirmed',
-            'role' => 'required|in:employee,backend,frontend,qa,pm,designer',
-        ]);
-
         $user = User::create([
             'name' => $request->name,
             'email' => $request->email,
@@ -84,14 +80,8 @@ class AuthController extends Controller
     }
 
     // API Methods for Next.js frontend
-    public function apiLogin(Request $request, TwoFactorService $twoFactorService)
+    public function apiLogin(ApiLoginRequest $request, TwoFactorService $twoFactorService): JsonResponse
     {
-        $request->validate([
-            'email' => 'required|email',
-            'password' => 'required',
-            'two_factor_code' => 'nullable|string|size:6',
-        ]);
-
         if (Auth::attempt($request->only('email', 'password'))) {
             $user = Auth::user();
 
@@ -132,20 +122,9 @@ class AuthController extends Controller
                 }
             }
 
-            // Determine display role based on status
-            $displayRole = $user->status === 'approved' ? $user->role : 'employee';
-
             return response()->json([
                 'success' => true,
-                'user' => [
-                    'id' => $user->id,
-                    'name' => $user->name,
-                    'email' => $user->email,
-                    'role' => $user->role,
-                    'display_role' => $displayRole,
-                    'status' => $user->status,
-                    'created_at' => $user->created_at,
-                ],
+                'user' => new UserResource($user),
                 'message' => 'Login successful'
             ]);
         }
@@ -156,15 +135,8 @@ class AuthController extends Controller
         ], 401);
     }
 
-    public function apiRegister(Request $request)
+    public function apiRegister(ApiRegisterRequest $request): JsonResponse
     {
-        $request->validate([
-            'name' => 'required|string|max:255',
-            'email' => 'required|string|email|max:255|unique:users',
-            'password' => 'required|string|min:8|confirmed',
-            'role' => 'required|in:employee,backend,frontend,qa,pm,designer',
-        ]);
-
         $user = User::create([
             'name' => $request->name,
             'email' => $request->email,
@@ -176,39 +148,20 @@ class AuthController extends Controller
 
         Auth::login($user);
 
-        $displayRole = $user->status === 'approved' ? $user->role : 'employee';
-
         return response()->json([
             'success' => true,
-            'user' => [
-                'id' => $user->id,
-                'name' => $user->name,
-                'email' => $user->email,
-                'role' => $user->role,
-                'display_role' => $displayRole,
-                'status' => $user->status,
-                'created_at' => $user->created_at,
-            ],
+            'user' => new UserResource($user),
             'message' => 'Registration successful. Your account is pending approval.'
-        ]);
+        ], 201);
     }
 
-    public function apiDashboard(Request $request)
+    public function apiDashboard(Request $request): JsonResponse
     {
         $user = $request->user();
-        $displayRole = $user->status === 'approved' ? $user->role : 'employee';
 
         return response()->json([
             'success' => true,
-            'user' => [
-                'id' => $user->id,
-                'name' => $user->name,
-                'email' => $user->email,
-                'role' => $user->role,
-                'display_role' => $displayRole,
-                'status' => $user->status,
-                'created_at' => $user->created_at,
-            ]
+            'user' => new UserResource($user),
         ]);
     }
 
@@ -287,13 +240,141 @@ class AuthController extends Controller
         ]);
     }
 
-    public function apiLogout(Request $request)
+    public function apiLogout(Request $request): JsonResponse
     {
         Auth::logout();
 
         return response()->json([
             'success' => true,
             'message' => 'Logged out successfully'
+        ]);
+    }
+
+    /**
+     * Update user profile
+     */
+    public function apiUpdateProfile(UpdateProfileRequest $request): JsonResponse
+    {
+        $user = $request->user();
+        $validated = $request->validated();
+
+        // Update only provided fields
+        if (isset($validated['name'])) {
+            $user->name = $validated['name'];
+        }
+        if (isset($validated['email'])) {
+            $user->email = $validated['email'];
+        }
+
+        $user->save();
+        $user->refresh();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Профилът беше актуализиран успешно.',
+            'user' => new UserResource($user),
+        ]);
+    }
+
+    /**
+     * Upload avatar
+     */
+    public function apiUploadAvatar(Request $request): JsonResponse
+    {
+        $request->validate([
+            'avatar' => 'required|image|mimes:jpeg,png,jpg,gif,webp|max:2048', // Max 2MB
+        ], [
+            'avatar.required' => 'Моля, изберете изображение.',
+            'avatar.image' => 'Файлът трябва да е изображение.',
+            'avatar.mimes' => 'Изображението трябва да е в формат: jpeg, png, jpg, gif или webp.',
+            'avatar.max' => 'Изображението не може да бъде по-голямо от 2MB.',
+        ]);
+
+        $user = $request->user();
+
+        // Delete old avatar if exists
+        if ($user->avatar_url) {
+            // Extract path from URL (remove domain if present)
+            $oldPath = parse_url($user->avatar_url, PHP_URL_PATH);
+            if ($oldPath && str_starts_with($oldPath, '/storage/avatars/')) {
+                Storage::disk('public')->delete(str_replace('/storage/', '', $oldPath));
+            }
+        }
+
+        // Store new avatar
+        $avatarPath = $request->file('avatar')->store('avatars', 'public');
+        $avatarUrl = Storage::url($avatarPath);
+
+        // Update user
+        $user->avatar_url = $avatarUrl;
+        $user->save();
+        $user->refresh();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Аватарът беше качен успешно.',
+            'avatar_url' => $avatarUrl,
+            'user' => new UserResource($user),
+        ]);
+    }
+
+    /**
+     * Delete avatar
+     */
+    public function apiDeleteAvatar(Request $request): JsonResponse
+    {
+        $user = $request->user();
+
+        if ($user->avatar_url) {
+            // Extract path from URL
+            $oldPath = parse_url($user->avatar_url, PHP_URL_PATH);
+            if ($oldPath && str_starts_with($oldPath, '/storage/avatars/')) {
+                Storage::disk('public')->delete(str_replace('/storage/', '', $oldPath));
+            }
+
+            $user->avatar_url = null;
+            $user->save();
+            $user->refresh();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Аватарът беше изтрит успешно.',
+                'user' => new UserResource($user),
+            ]);
+        }
+
+        return response()->json([
+            'success' => false,
+            'message' => 'Няма аватар за изтриване.',
+        ], 404);
+    }
+
+    /**
+     * Change password
+     */
+    public function apiChangePassword(ChangePasswordRequest $request): JsonResponse
+    {
+        $user = $request->user();
+        $validated = $request->validated();
+
+        // Verify current password
+        if (!Hash::check($validated['current_password'], $user->password)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Текущата парола е неправилна.',
+                'errors' => [
+                    'current_password' => ['Текущата парола е неправилна.'],
+                ],
+            ], 422);
+        }
+
+        // Update password
+        $user->password = $validated['password']; // Will be hashed automatically by the model
+        $user->save();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Паролата беше променена успешно.',
         ]);
     }
 }

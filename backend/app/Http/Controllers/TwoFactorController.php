@@ -4,9 +4,14 @@ namespace App\Http\Controllers;
 
 use App\Models\User;
 use App\Services\TwoFactorService;
+use App\Http\Requests\SetupTwoFactorRequest;
+use App\Http\Requests\VerifyTwoFactorRequest;
+use App\Http\Requests\DisableTwoFactorRequest;
+use App\Http\Resources\TwoFactorResource;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
 class TwoFactorController extends Controller
@@ -21,26 +26,24 @@ class TwoFactorController extends Controller
     /**
      * Setup 2FA for the authenticated user
      */
-    public function setup(Request $request): JsonResponse
+    public function setup(SetupTwoFactorRequest $request): JsonResponse
     {
         try {
-            $request->validate([
-                'type' => 'required|in:email,telegram,google_authenticator',
-                'telegram_chat_id' => 'required_if:type,telegram|nullable|string',
-            ]);
-
             $user = Auth::user();
             $type = $request->type;
 
-            $user->two_factor_type = $type;
-            $user->two_factor_enabled = false;
-            $user->two_factor_verified_at = null;
-
             if ($type === 'google_authenticator') {
                 $secret = $this->twoFactorService->generateGoogleSecret($user);
-                $user->two_factor_secret = $secret;
+                
+                DB::transaction(function () use ($user, $type, $secret) {
+                    $user->two_factor_type = $type;
+                    $user->two_factor_enabled = false;
+                    $user->two_factor_verified_at = null;
+                    $user->two_factor_secret = $secret;
+                    $user->save();
+                });
+
                 $qrCodeUrl = $this->twoFactorService->getQRCodeUrl($user, $secret);
-                $user->save();
 
                 return response()->json([
                     'success' => true,
@@ -53,12 +56,18 @@ class TwoFactorController extends Controller
                 ]);
             }
 
-            if ($type === 'telegram') {
-                $user->telegram_chat_id = $request->telegram_chat_id;
-            }
-
-            $user->two_factor_secret = null;
-            $user->save();
+            DB::transaction(function () use ($user, $type, $request) {
+                $user->two_factor_type = $type;
+                $user->two_factor_enabled = false;
+                $user->two_factor_verified_at = null;
+                $user->two_factor_secret = null;
+                
+                if ($type === 'telegram') {
+                    $user->telegram_chat_id = $request->telegram_chat_id;
+                }
+                
+                $user->save();
+            });
 
             // Generate and send code for verification
             try {
@@ -99,12 +108,8 @@ class TwoFactorController extends Controller
     /**
      * Verify and enable 2FA
      */
-    public function verify(Request $request): JsonResponse
+    public function verify(VerifyTwoFactorRequest $request): JsonResponse
     {
-        $request->validate([
-            'code' => 'required|string|size:6',
-        ]);
-
         $user = Auth::user();
 
         if (!$user->two_factor_type || $user->two_factor_type === 'none') {
@@ -122,37 +127,28 @@ class TwoFactorController extends Controller
             ]);
         }
 
-        $user->two_factor_enabled = true;
-        $user->two_factor_verified_at = now();
-        $user->save();
+        DB::transaction(function () use ($user) {
+            $user->two_factor_enabled = true;
+            $user->two_factor_verified_at = now();
+            $user->save();
+        });
+
+        // Refresh user to get latest data
+        $user->refresh();
 
         return response()->json([
             'success' => true,
             'message' => '2FA enabled successfully',
-            'data' => [
-                'two_factor_enabled' => true,
-                'two_factor_type' => $user->two_factor_type,
-            ],
+            'data' => new TwoFactorResource($user),
         ]);
     }
 
     /**
      * Disable 2FA
      */
-    public function disable(Request $request): JsonResponse
+    public function disable(DisableTwoFactorRequest $request): JsonResponse
     {
-        $request->validate([
-            'code' => 'required|string|size:6',
-        ]);
-
         $user = Auth::user();
-
-        if (!$user->two_factor_enabled) {
-            return response()->json([
-                'success' => false,
-                'message' => '2FA is not enabled.',
-            ], 400);
-        }
 
         // Verify code before disabling
         $valid = $this->twoFactorService->verifyCode($user, $request->code);
@@ -163,12 +159,14 @@ class TwoFactorController extends Controller
             ]);
         }
 
-        $user->two_factor_enabled = false;
-        $user->two_factor_type = 'none';
-        $user->two_factor_secret = null;
-        $user->telegram_chat_id = null;
-        $user->two_factor_verified_at = null;
-        $user->save();
+        DB::transaction(function () use ($user) {
+            $user->two_factor_enabled = false;
+            $user->two_factor_type = 'none';
+            $user->two_factor_secret = null;
+            $user->telegram_chat_id = null;
+            $user->two_factor_verified_at = null;
+            $user->save();
+        });
 
         return response()->json([
             'success' => true,
@@ -193,11 +191,7 @@ class TwoFactorController extends Controller
 
             return response()->json([
                 'success' => true,
-                'data' => [
-                    'two_factor_enabled' => $user->two_factor_enabled ?? false,
-                    'two_factor_type' => $user->two_factor_type ?? 'none',
-                    'has_telegram_chat_id' => !empty($user->telegram_chat_id),
-                ],
+                'data' => new TwoFactorResource($user),
             ]);
         } catch (\Exception $e) {
             \Log::error('TwoFactorController::status error', [

@@ -12,8 +12,9 @@ return new class extends Migration
     public function up(): void
     {
         Schema::table('users', function (Blueprint $table) {
-            // Include 'rejected' status from the beginning
-            $table->enum('status', ['pending', 'approved', 'rejected'])->default('pending')->after('role');
+            if (!Schema::hasColumn('users', 'avatar_url')) {
+                $table->string('avatar_url', 500)->nullable()->after('email_verified_at');
+            }
         });
     }
 
@@ -23,7 +24,10 @@ return new class extends Migration
     public function down(): void
     {
         Schema::table('users', function (Blueprint $table) {
-            //
+            if (Schema::hasColumn('users', 'avatar_url')) {
+                $table->dropColumn('avatar_url');
+            }
         });
     }
 };
+

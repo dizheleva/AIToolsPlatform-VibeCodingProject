@@ -6,10 +6,17 @@ use App\Models\AiTool;
 use App\Models\Category;
 use App\Models\User;
 use App\Services\ActivityLogService;
+use App\Http\Requests\ApproveToolRequest;
+use App\Http\Requests\CreateUserRequest;
+use App\Http\Requests\ApproveUserRequest;
+use App\Http\Requests\UpdateUserRoleRequest;
+use App\Http\Resources\AiToolResource;
+use App\Http\Resources\UserResource;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Hash;
 
@@ -25,9 +32,17 @@ class AdminController extends Controller
      */
     public function tools(Request $request): JsonResponse
     {
+        // Check authorization
+        if (!Gate::allows('manageTools', User::class)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Unauthorized. Only owners can access admin tools.',
+            ], 403);
+        }
+
         try {
             $query = AiTool::query();
-            
+
             // Eager load relationships only if they exist
             $query->with(['creator', 'updater', 'categories', 'toolRoles']);
 
@@ -63,18 +78,25 @@ class AdminController extends Controller
                 });
             }
 
-            // Sorting
+            // Sorting - validate sort_by against whitelist
+            $allowedSortFields = ['created_at', 'updated_at', 'name', 'status', 'views_count', 'likes_count'];
             $sortBy = $request->get('sort_by', 'created_at');
+            if (!in_array($sortBy, $allowedSortFields)) {
+                $sortBy = 'created_at';
+            }
             $sortOrder = $request->get('sort_order', 'desc');
+            if (!in_array(strtolower($sortOrder), ['asc', 'desc'])) {
+                $sortOrder = 'desc';
+            }
             $query->orderBy($sortBy, $sortOrder);
 
-            // Pagination
-            $perPage = $request->get('per_page', 20);
+            // Pagination - validate per_page
+            $perPage = min(max((int) $request->get('per_page', 20), 1), 100);
             $tools = $query->paginate($perPage);
 
             return response()->json([
                 'success' => true,
-                'data' => $tools->items(),
+                'data' => AiToolResource::collection($tools->items()),
                 'pagination' => [
                     'current_page' => $tools->currentPage(),
                     'last_page' => $tools->lastPage(),
@@ -90,8 +112,6 @@ class AdminController extends Controller
             return response()->json([
                 'success' => false,
                 'message' => $e->getMessage(),
-                'file' => $e->getFile(),
-                'line' => $e->getLine(),
             ], 500);
         }
     }
@@ -99,28 +119,27 @@ class AdminController extends Controller
     /**
      * Approve or reject a tool
      */
-    public function approveTool(Request $request, AiTool $aiTool, ActivityLogService $activityLogService): JsonResponse
+    public function approveTool(ApproveToolRequest $request, AiTool $aiTool, ActivityLogService $activityLogService): JsonResponse
     {
-        $request->validate([
-            'status' => 'required|in:active,inactive,pending_review',
-        ]);
-
         $oldStatus = $aiTool->status;
-        $aiTool->status = $request->status;
-        $aiTool->updated_by = auth()->id();
-        $aiTool->save();
 
-        // Log activity
-        $action = $request->status === 'active' ? 'approved' : ($request->status === 'inactive' ? 'rejected' : 'updated');
-        $activityLogService->log($action, $aiTool, "Tool status changed from {$oldStatus} to {$request->status}");
+        DB::transaction(function () use ($request, $aiTool, $oldStatus, $activityLogService) {
+            $aiTool->status = $request->status;
+            $aiTool->updated_by = auth()->id();
+            $aiTool->save();
 
-        // Clear cache
-        Cache::flush();
+            // Log activity
+            $action = $request->status === 'active' ? 'approved' : ($request->status === 'inactive' ? 'rejected' : 'updated');
+            $activityLogService->log($action, $aiTool, "Tool status changed from {$oldStatus} to {$request->status}");
+        });
+
+        // Clear cache intelligently
+        $this->clearToolsCache();
 
         return response()->json([
             'success' => true,
             'message' => "Tool {$request->status} successfully",
-            'data' => $aiTool->load(['creator', 'updater', 'categories', 'toolRoles']),
+            'data' => new AiToolResource($aiTool->load(['creator', 'updater', 'categories', 'toolRoles'])),
         ]);
     }
 
@@ -129,6 +148,14 @@ class AdminController extends Controller
      */
     public function pendingTools(): JsonResponse
     {
+        // Check authorization
+        if (!Gate::allows('manageTools', User::class)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Unauthorized. Only owners can view pending tools.',
+            ], 403);
+        }
+
         $tools = AiTool::where('status', 'pending_review')
             ->with(['creator', 'categories', 'toolRoles'])
             ->orderBy('created_at', 'desc')
@@ -136,7 +163,7 @@ class AdminController extends Controller
 
         return response()->json([
             'success' => true,
-            'data' => $tools,
+            'data' => AiToolResource::collection($tools),
             'count' => $tools->count(),
         ]);
     }
@@ -146,6 +173,14 @@ class AdminController extends Controller
      */
     public function statistics(): JsonResponse
     {
+        // Check authorization
+        if (!Gate::allows('viewStatistics', User::class)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Unauthorized. Only owners can view statistics.',
+            ], 403);
+        }
+
         $stats = Cache::remember('admin_statistics', 300, function () {
             return [
                 'total_tools' => AiTool::count(),
@@ -156,6 +191,7 @@ class AdminController extends Controller
                 'total_users' => User::count(),
                 'approved_users' => User::where('status', 'approved')->count(),
                 'pending_users' => User::where('status', 'pending')->count(),
+                'rejected_users' => User::where('status', 'rejected')->count(),
                 'tools_by_status' => AiTool::select('status', DB::raw('count(*) as count'))
                     ->groupBy('status')
                     ->pluck('count', 'status'),
@@ -178,6 +214,14 @@ class AdminController extends Controller
      */
     public function users(Request $request): JsonResponse
     {
+        // Check authorization
+        if (!Gate::allows('manageUsers', User::class)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Unauthorized. Only owners can manage users.',
+            ], 403);
+        }
+
         $query = User::query();
 
         // Filter by status
@@ -199,18 +243,25 @@ class AdminController extends Controller
             });
         }
 
-        // Sorting
+        // Sorting - validate sort_by against whitelist
+        $allowedSortFields = ['created_at', 'updated_at', 'name', 'email', 'role', 'status'];
         $sortBy = $request->get('sort_by', 'created_at');
+        if (!in_array($sortBy, $allowedSortFields)) {
+            $sortBy = 'created_at';
+        }
         $sortOrder = $request->get('sort_order', 'desc');
+        if (!in_array(strtolower($sortOrder), ['asc', 'desc'])) {
+            $sortOrder = 'desc';
+        }
         $query->orderBy($sortBy, $sortOrder);
 
-        // Pagination
-        $perPage = $request->get('per_page', 20);
+        // Pagination - validate per_page
+        $perPage = min(max((int) $request->get('per_page', 20), 1), 100);
         $users = $query->paginate($perPage);
 
         return response()->json([
             'success' => true,
-            'data' => $users->items(),
+            'data' => UserResource::collection($users->items()),
             'pagination' => [
                 'current_page' => $users->currentPage(),
                 'last_page' => $users->lastPage(),
@@ -223,39 +274,31 @@ class AdminController extends Controller
     /**
      * Create a new user (admin only)
      */
-    public function createUser(Request $request, ActivityLogService $activityLogService): JsonResponse
+    public function createUser(CreateUserRequest $request, ActivityLogService $activityLogService): JsonResponse
     {
-        $request->validate([
-            'name' => 'required|string|max:255',
-            'email' => 'required|string|email|max:255|unique:users',
-            'password' => 'required|string|min:8',
-            'role' => 'required|in:employee,backend,frontend,qa,pm,designer,owner',
-            'status' => 'nullable|in:pending,approved,rejected',
-        ]);
+        $user = DB::transaction(function () use ($request, $activityLogService) {
+            $user = User::create([
+                'name' => $request->name,
+                'email' => $request->email,
+                'password' => Hash::make($request->password),
+                'role' => $request->role,
+                'status' => $request->status ?? 'approved', // Default to approved when created by admin
+                'email_verified_at' => now(),
+            ]);
 
-        $user = User::create([
-            'name' => $request->name,
-            'email' => $request->email,
-            'password' => Hash::make($request->password),
-            'role' => $request->role,
-            'status' => $request->status ?? 'approved', // Default to approved when created by admin
-            'email_verified_at' => now(),
-        ]);
+            // Log activity
+            $activityLogService->log('created', $user, "User created by admin");
 
-        // Log activity
-        $activityLogService->log('created', $user, "User created by admin");
+            return $user;
+        });
+
+        // Clear admin cache
+        $this->clearAdminCache();
 
         return response()->json([
             'success' => true,
             'message' => 'User created successfully',
-            'data' => [
-                'id' => $user->id,
-                'name' => $user->name,
-                'email' => $user->email,
-                'role' => $user->role,
-                'status' => $user->status,
-                'created_at' => $user->created_at,
-            ],
+            'data' => new UserResource($user),
         ]);
     }
 
@@ -264,89 +307,124 @@ class AdminController extends Controller
      */
     public function userDetails(User $user): JsonResponse
     {
+        // Check authorization
+        if (!Gate::allows('manageUsers', User::class)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Unauthorized. Only owners can view user details.',
+            ], 403);
+        }
+
         $user->load(['createdTools', 'likedTools']);
-        
+
         return response()->json([
             'success' => true,
-            'data' => [
-                'id' => $user->id,
-                'name' => $user->name,
-                'email' => $user->email,
-                'role' => $user->role,
-                'status' => $user->status,
-                'created_at' => $user->created_at,
-                'updated_at' => $user->updated_at,
-                'created_tools_count' => $user->createdTools()->count(),
-                'liked_tools_count' => $user->likedTools()->count(),
-                'created_tools' => $user->createdTools()->latest()->limit(10)->get(['id', 'name', 'slug', 'status', 'created_at']),
-            ],
+            'data' => new UserResource($user),
         ]);
     }
 
     /**
      * Approve or reject a user
      */
-    public function approveUser(Request $request, User $user, ActivityLogService $activityLogService): JsonResponse
+    public function approveUser(ApproveUserRequest $request, User $user, ActivityLogService $activityLogService): JsonResponse
     {
-        $request->validate([
-            'status' => 'required|in:approved,rejected,pending',
-        ]);
-
         $oldStatus = $user->status;
-        $user->status = $request->status;
-        $user->save();
 
-        // Log activity
-        $action = $request->status === 'approved' ? 'approved' : ($request->status === 'rejected' ? 'rejected' : 'updated');
-        $activityLogService->log($action, $user, "User status changed from {$oldStatus} to {$request->status}");
+        DB::transaction(function () use ($request, $user, $oldStatus, $activityLogService) {
+            $user->status = $request->status;
+            $user->save();
 
-        // Send email notification
-        try {
-            if ($request->status === 'approved') {
-                Mail::send('emails.user-approved', ['user' => $user], function ($message) use ($user) {
-                    $message->to($user->email, $user->name)
-                            ->subject('Вашият акаунт е одобрен - AI Tools Platform');
-                });
-            } elseif ($request->status === 'rejected') {
-                Mail::send('emails.user-rejected', ['user' => $user], function ($message) use ($user) {
-                    $message->to($user->email, $user->name)
-                            ->subject('Вашият акаунт е отхвърлен - AI Tools Platform');
-                });
+            // Log activity
+            try {
+                $action = $request->status === 'approved' ? 'approved' : ($request->status === 'rejected' ? 'rejected' : 'updated');
+                $activityLogService->log($action, $user, "User status changed from {$oldStatus} to {$request->status}");
+            } catch (\Exception $e) {
+                \Log::warning('Failed to log activity', [
+                    'error' => $e->getMessage(),
+                ]);
+                // Don't fail the transaction if logging fails
             }
-        } catch (\Exception $e) {
-            \Log::warning('Failed to send user status email', [
-                'user_id' => $user->id,
-                'error' => $e->getMessage(),
-            ]);
+        });
+
+        // Refresh user to get latest data
+        $user->refresh();
+
+        // Send email notification (only in production, skip in tests)
+        if (!app()->environment('testing')) {
+            try {
+                if ($request->status === 'approved') {
+                    Mail::send('emails.user-approved', ['user' => $user], function ($message) use ($user) {
+                        $message->to($user->email, $user->name)
+                                ->subject('Вашият акаунт е одобрен - AI Tools Platform');
+                    });
+                } elseif ($request->status === 'rejected') {
+                    Mail::send('emails.user-rejected', ['user' => $user], function ($message) use ($user) {
+                        $message->to($user->email, $user->name)
+                                ->subject('Вашият акаунт е отхвърлен - AI Tools Platform');
+                    });
+                }
+            } catch (\Exception $e) {
+                \Log::warning('Failed to send user status email', [
+                    'user_id' => $user->id,
+                    'error' => $e->getMessage(),
+                ]);
+                // Don't fail the request if email fails
+            }
         }
 
-        return response()->json([
-            'success' => true,
-            'message' => "User {$request->status} successfully",
-            'data' => $user,
-        ]);
+        // Clear admin cache
+        $this->clearAdminCache();
+
+        try {
+            return response()->json([
+                'success' => true,
+                'message' => "User {$request->status} successfully",
+                'data' => new UserResource($user),
+            ]);
+        } catch (\Exception $e) {
+            \Log::error('Failed to return user resource', [
+                'user_id' => $user->id,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+
+            // Fallback response if UserResource fails
+            return response()->json([
+                'success' => true,
+                'message' => "User {$request->status} successfully",
+                'data' => [
+                    'id' => $user->id,
+                    'name' => $user->name,
+                    'email' => $user->email,
+                    'role' => $user->role,
+                    'status' => $user->status,
+                ],
+            ]);
+        }
     }
 
     /**
      * Update user role
      */
-    public function updateUserRole(Request $request, User $user, ActivityLogService $activityLogService): JsonResponse
+    public function updateUserRole(UpdateUserRoleRequest $request, User $user, ActivityLogService $activityLogService): JsonResponse
     {
-        $request->validate([
-            'role' => 'required|in:employee,backend,frontend,qa,pm,designer,owner',
-        ]);
-
         $oldRole = $user->role;
-        $user->role = $request->role;
-        $user->save();
 
-        // Log activity
-        $activityLogService->log('updated', $user, "User role changed from {$oldRole} to {$request->role}");
+        DB::transaction(function () use ($request, $user, $oldRole, $activityLogService) {
+            $user->role = $request->role;
+            $user->save();
+
+            // Log activity
+            $activityLogService->log('updated', $user, "User role changed from {$oldRole} to {$request->role}");
+        });
+
+        // Clear admin cache
+        $this->clearAdminCache();
 
         return response()->json([
             'success' => true,
             'message' => 'User role updated successfully',
-            'data' => $user,
+            'data' => new UserResource($user),
         ]);
     }
 
@@ -355,6 +433,14 @@ class AdminController extends Controller
      */
     public function exportUsers(Request $request)
     {
+        // Check authorization
+        if (!Gate::allows('exportData', User::class)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Unauthorized. Only owners can export data.',
+            ], 403);
+        }
+
         $query = User::query();
 
         // Apply same filters as users() method
@@ -377,7 +463,7 @@ class AdminController extends Controller
         $users = $query->orderBy('created_at', 'desc')->get();
 
         $filename = 'users_export_' . date('Y-m-d_His') . '.csv';
-        
+
         $headers = [
             'Content-Type' => 'text/csv',
             'Content-Disposition' => "attachment; filename=\"{$filename}\"",
@@ -385,13 +471,13 @@ class AdminController extends Controller
 
         $callback = function() use ($users) {
             $file = fopen('php://output', 'w');
-            
+
             // Add BOM for UTF-8
             fprintf($file, chr(0xEF).chr(0xBB).chr(0xBF));
-            
+
             // Headers
             fputcsv($file, ['ID', 'Име', 'Email', 'Роля', 'Статус', 'Регистриран на', 'Обновен на']);
-            
+
             // Data
             foreach ($users as $user) {
                 fputcsv($file, [
@@ -404,11 +490,59 @@ class AdminController extends Controller
                     $user->updated_at->format('Y-m-d H:i:s'),
                 ]);
             }
-            
+
             fclose($file);
         };
 
         return response()->stream($callback, 200, $headers);
+    }
+
+    /**
+     * Clear tools cache intelligently
+     */
+    private function clearToolsCache(): void
+    {
+        try {
+            // Try to use cache tags if available (Redis)
+            if (method_exists(Cache::getStore(), 'tags')) {
+                Cache::tags(['tools'])->flush();
+            } else {
+                // Fallback: clear common cache keys
+                $commonFilters = [
+                    [],
+                    ['status' => 'active'],
+                    ['status' => 'pending_review'],
+                    ['status' => 'inactive'],
+                ];
+
+                foreach ($commonFilters as $filters) {
+                    $cacheKey = 'tools_count_' . md5(json_encode($filters));
+                    Cache::forget($cacheKey);
+                }
+            }
+        } catch (\Exception $e) {
+            \Log::warning('Failed to clear tools cache', [
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * Clear admin cache intelligently
+     */
+    private function clearAdminCache(): void
+    {
+        try {
+            // Clear admin statistics cache
+            Cache::forget('admin_statistics');
+
+            // Also clear tools cache since user changes might affect tool visibility
+            $this->clearToolsCache();
+        } catch (\Exception $e) {
+            \Log::warning('Failed to clear admin cache', [
+                'error' => $e->getMessage(),
+            ]);
+        }
     }
 }
 

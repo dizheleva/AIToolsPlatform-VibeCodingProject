@@ -14,11 +14,12 @@ class DatabaseSeeder extends Seeder
     public function run(): void
     {
         // Create admin user (owner) - use updateOrCreate to avoid duplicates
+        // Password will be automatically hashed by the User model's setPasswordAttribute mutator
         User::updateOrCreate(
             ['email' => 'ivan@admin.local'],
             [
                 'name' => 'Иван Иванов',
-                'password' => Hash::make('password'),
+                'password' => 'password', // Will be hashed automatically
                 'role' => 'owner',
                 'status' => 'approved',
                 'email_verified_at' => now(),
@@ -59,7 +60,7 @@ class DatabaseSeeder extends Seeder
                 ['email' => $userData['email']],
                 [
                     'name' => $userData['name'],
-                    'password' => Hash::make('password'),
+                    'password' => 'password', // Will be hashed automatically
                     'role' => $userData['role'],
                     'status' => 'pending',
                     'email_verified_at' => now(),

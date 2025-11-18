@@ -4,10 +4,15 @@ namespace App\Http\Controllers;
 
 use App\Models\Category;
 use App\Services\ActivityLogService;
+use App\Http\Resources\CategoryResource;
+use App\Http\Requests\StoreCategoryRequest;
+use App\Http\Requests\UpdateCategoryRequest;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
 class CategoryController extends Controller
@@ -53,34 +58,16 @@ class CategoryController extends Controller
 
         return response()->json([
             'success' => true,
-            'data' => $categories,
+            'data' => CategoryResource::collection($categories),
         ]);
     }
 
     /**
      * Store a newly created category.
      */
-    public function store(Request $request, ActivityLogService $activityLogService): JsonResponse
+    public function store(StoreCategoryRequest $request, ActivityLogService $activityLogService): JsonResponse
     {
-        $user = Auth::user();
-
-        // Only owners can create categories
-        if ($user->role !== 'owner' || $user->status !== 'approved') {
-            return response()->json([
-                'success' => false,
-                'message' => 'Only owners can create categories.',
-            ], 403);
-        }
-
-        $validated = $request->validate([
-            'name' => 'required|string|max:100',
-            'description' => 'nullable|string',
-            'icon' => 'nullable|string|max:50',
-            'color' => 'nullable|string|max:7|regex:/^#[0-9A-Fa-f]{6}$/',
-            'parent_id' => 'nullable|exists:categories,id',
-            'order' => 'nullable|integer|min:0',
-            'is_active' => 'nullable|boolean',
-        ]);
+        $validated = $request->validated();
 
         // Generate slug from name
         $slug = Str::slug($validated['name']);
@@ -91,23 +78,34 @@ class CategoryController extends Controller
             $counter++;
         }
 
-        $category = Category::create([
-            ...$validated,
-            'slug' => $slug,
-            'order' => $validated['order'] ?? 0,
-            'is_active' => $validated['is_active'] ?? true,
-        ]);
+        $category = DB::transaction(function () use ($validated, $slug, $activityLogService) {
+            $category = Category::create([
+                ...$validated,
+                'slug' => $slug,
+                'order' => $validated['order'] ?? 0,
+                'is_active' => $validated['is_active'] ?? true,
+            ]);
 
-        // Log activity
-        $activityLogService->log('created', $category);
+            // Log activity
+            try {
+                $activityLogService->log('created', $category);
+            } catch (\Exception $e) {
+                \Log::warning('Failed to log activity', [
+                    'error' => $e->getMessage(),
+                ]);
+                // Don't fail the transaction if logging fails
+            }
 
-        // Clear cache
-        Cache::flush(); // Clear all category caches
+            return $category;
+        });
+
+        // Clear cache - use intelligent cache clearing
+        $this->clearCategoriesCache();
 
         return response()->json([
             'success' => true,
             'message' => 'Category created successfully.',
-            'data' => $category,
+            'data' => new CategoryResource($category),
         ], 201);
     }
 
@@ -120,36 +118,17 @@ class CategoryController extends Controller
 
         return response()->json([
             'success' => true,
-            'data' => $category,
+            'data' => new CategoryResource($category),
         ]);
     }
 
     /**
      * Update the specified category.
      */
-    public function update(Request $request, Category $category, ActivityLogService $activityLogService): JsonResponse
+    public function update(UpdateCategoryRequest $request, Category $category, ActivityLogService $activityLogService): JsonResponse
     {
-        $user = Auth::user();
-
-        // Only owners can update categories
-        if ($user->role !== 'owner' || $user->status !== 'approved') {
-            return response()->json([
-                'success' => false,
-                'message' => 'Only owners can update categories.',
-            ], 403);
-        }
-
         $oldValues = $category->toArray();
-
-        $validated = $request->validate([
-            'name' => 'sometimes|required|string|max:100',
-            'description' => 'nullable|string',
-            'icon' => 'nullable|string|max:50',
-            'color' => 'nullable|string|max:7|regex:/^#[0-9A-Fa-f]{6}$/',
-            'parent_id' => 'nullable|exists:categories,id',
-            'order' => 'nullable|integer|min:0',
-            'is_active' => 'nullable|boolean',
-        ]);
+        $validated = $request->validated();
 
         // Update slug if name changed
         if (isset($validated['name']) && $validated['name'] !== $category->name) {
@@ -171,18 +150,30 @@ class CategoryController extends Controller
             ], 422);
         }
 
-        $category->update($validated);
+        DB::transaction(function () use ($category, $validated, $oldValues, $activityLogService) {
+            $category->update($validated);
 
-        // Log activity
-        $activityLogService->log('updated', $category, null, $oldValues, $category->fresh()->toArray());
+            // Log activity
+            try {
+                $activityLogService->log('updated', $category, null, $oldValues, $category->fresh()->toArray());
+            } catch (\Exception $e) {
+                \Log::warning('Failed to log activity', [
+                    'error' => $e->getMessage(),
+                ]);
+                // Don't fail the transaction if logging fails
+            }
+        });
 
-        // Clear cache
-        Cache::flush(); // Clear all category caches
+        // Refresh category to get latest data
+        $category->refresh();
+
+        // Clear cache - use intelligent cache clearing
+        $this->clearCategoriesCache();
 
         return response()->json([
             'success' => true,
             'message' => 'Category updated successfully.',
-            'data' => $category,
+            'data' => new CategoryResource($category),
         ]);
     }
 
@@ -191,10 +182,8 @@ class CategoryController extends Controller
      */
     public function destroy(Category $category, ActivityLogService $activityLogService): JsonResponse
     {
-        $user = Auth::user();
-
-        // Only owners can delete categories
-        if ($user->role !== 'owner' || $user->status !== 'approved') {
+        // Check authorization using Policy
+        if (!Gate::allows('delete', $category)) {
             return response()->json([
                 'success' => false,
                 'message' => 'Only owners can delete categories.',
@@ -222,13 +211,47 @@ class CategoryController extends Controller
 
         $category->delete();
 
-        // Clear cache
-        Cache::flush(); // Clear all category caches
+        // Clear cache - use intelligent cache clearing
+        $this->clearCategoriesCache();
 
         return response()->json([
             'success' => true,
             'message' => 'Category deleted successfully.',
         ]);
+    }
+
+    /**
+     * Clear categories-related cache keys.
+     * Instead of flushing all cache, we clear only relevant keys.
+     */
+    private function clearCategoriesCache(): void
+    {
+        $cacheDriver = config('cache.default');
+
+        // If using Redis, try to use cache tags for more efficient clearing
+        if ($cacheDriver === 'redis' && method_exists(Cache::getStore(), 'tags')) {
+            try {
+                Cache::tags(['categories'])->flush();
+                return;
+            } catch (\Exception $e) {
+                // If tags are not supported, fall back to manual clearing
+                \Log::warning('Cache tags not available, falling back to manual cache clearing');
+            }
+        }
+
+        // Manual cache clearing for other drivers
+        $commonFilters = [
+            [],
+            ['active' => true],
+            ['active' => false],
+            ['parent_id' => 'null'],
+            ['with_counts' => true],
+        ];
+
+        foreach ($commonFilters as $filters) {
+            $cacheKey = 'categories_list_' . md5(json_encode($filters));
+            Cache::forget($cacheKey);
+        }
     }
 }
 

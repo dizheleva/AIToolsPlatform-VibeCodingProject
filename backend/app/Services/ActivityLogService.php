@@ -56,9 +56,9 @@ class ActivityLogService
     /**
      * Get activity logs with filters
      */
-    public function getLogs(array $filters = [], int $perPage = 20)
+    public function getLogs(array $filters = [], int $perPage = 20, ?string $sortBy = null, ?string $sortOrder = null)
     {
-        $query = ActivityLog::with('user')->orderBy('created_at', 'desc');
+        $query = ActivityLog::with('user');
 
         if (isset($filters['user_id'])) {
             $query->where('user_id', $filters['user_id']);
@@ -83,6 +83,13 @@ class ActivityLogService
         if (isset($filters['date_to'])) {
             $query->whereDate('created_at', '<=', $filters['date_to']);
         }
+
+        // Apply sorting - validate against whitelist
+        $allowedSortColumns = ['created_at', 'action', 'model_type'];
+        $sortBy = $sortBy && in_array($sortBy, $allowedSortColumns) ? $sortBy : 'created_at';
+        $sortOrder = $sortOrder && in_array(strtolower($sortOrder), ['asc', 'desc']) ? strtolower($sortOrder) : 'desc';
+        
+        $query->orderBy($sortBy, $sortOrder);
 
         return $query->paginate($perPage);
     }

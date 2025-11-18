@@ -2,10 +2,12 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { User, Mail, Shield, Calendar, Hash, AlertCircle } from 'lucide-react';
+import { User, Mail, Shield, Calendar, Hash, AlertCircle, Edit } from 'lucide-react';
 import MainLayout from '@/components/layout/MainLayout';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import EditProfileModal from '@/components/profile/EditProfileModal';
 import { getRoleDisplayName, getRoleColor, formatDate } from '@/lib/utils';
 
 interface User {
@@ -14,6 +16,7 @@ interface User {
   email: string;
   role: string;
   status: string;
+  avatar_url?: string | null;
   created_at: string;
 }
 
@@ -27,6 +30,7 @@ export default function ProfilePage() {
   const [stats, setStats] = useState<UserStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [statsLoading, setStatsLoading] = useState(true);
+  const [editModalOpen, setEditModalOpen] = useState(false);
   const router = useRouter();
 
   const fetchStats = async () => {
@@ -108,9 +112,18 @@ export default function ProfilePage() {
   return (
     <MainLayout containerSize="md">
       {/* Header */}
-      <div className="mb-6">
-        <h1 className="text-3xl font-bold text-gray-900 mb-2">Профил</h1>
-        <p className="text-gray-600">Управлявай своя профил и настройки</p>
+      <div className="mb-6 flex items-center justify-between">
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900 mb-2">Профил</h1>
+          <p className="text-gray-600">Управлявай своя профил и настройки</p>
+        </div>
+        <Button
+          onClick={() => setEditModalOpen(true)}
+          className="flex items-center space-x-2"
+        >
+          <Edit className="h-4 w-4" />
+          <span>Редактирай</span>
+        </Button>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -118,8 +131,12 @@ export default function ProfilePage() {
         <div className="lg:col-span-2 space-y-6">
           <Card>
             <CardHeader>
-              <CardTitle>Лична информация</CardTitle>
-              <CardDescription>Основна информация за твоя профил</CardDescription>
+              <div className="flex items-center justify-between">
+                <div>
+                  <CardTitle>Лична информация</CardTitle>
+                  <CardDescription>Основна информация за твоя профил</CardDescription>
+                </div>
+              </div>
             </CardHeader>
             <CardContent className="space-y-6">
               <div className="flex items-center justify-between py-3 border-b">
@@ -223,11 +240,19 @@ export default function ProfilePage() {
             </CardHeader>
             <CardContent>
               <div className="flex flex-col items-center space-y-4">
-                <div className="h-24 w-24 rounded-full bg-primary flex items-center justify-center text-white text-3xl font-bold">
-                  {user.name.charAt(0).toUpperCase()}
-                </div>
+                {user.avatar_url ? (
+                  <img
+                    src={`http://localhost:8201${user.avatar_url}`}
+                    alt={`${user.name} avatar`}
+                    className="h-24 w-24 rounded-full object-cover border-2 border-gray-300"
+                  />
+                ) : (
+                  <div className="h-24 w-24 rounded-full bg-primary flex items-center justify-center text-white text-3xl font-bold border-2 border-gray-300">
+                    {user.name.charAt(0).toUpperCase()}
+                  </div>
+                )}
                 <p className="text-sm text-muted-foreground text-center">
-                  Промяната на аватара ще бъде достъпна скоро
+                  Кликни на "Редактирай" за да промениш аватара
                 </p>
               </div>
             </CardContent>
@@ -259,6 +284,17 @@ export default function ProfilePage() {
           </Card>
         </div>
       </div>
+
+      {/* Edit Profile Modal */}
+      <EditProfileModal
+        open={editModalOpen}
+        onOpenChange={setEditModalOpen}
+        user={user}
+        onUpdate={(updatedUser) => {
+          setUser(updatedUser);
+          localStorage.setItem('user', JSON.stringify(updatedUser));
+        }}
+      />
     </MainLayout>
   );
 }

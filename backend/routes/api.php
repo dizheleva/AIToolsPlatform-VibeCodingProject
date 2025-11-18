@@ -31,32 +31,29 @@ Route::bind('review', function ($value) {
 */
 
 // Auth API routes (using web middleware for session support)
+// Rate limiting: 5 attempts per minute per IP (brute force protection)
 Route::middleware(['web', 'guest'])->group(function () {
-    Route::post('/login', [AuthController::class, 'apiLogin']);
-    Route::post('/register', [AuthController::class, 'apiRegister']);
+    Route::post('/login', [AuthController::class, 'apiLogin'])
+        ->middleware('throttle:5,1');
+    Route::post('/register', [AuthController::class, 'apiRegister'])
+        ->middleware('throttle:5,1');
 });
 
 Route::middleware(['web', 'auth'])->group(function () {
     Route::get('/user', function (Request $request) {
         $user = $request->user();
-        $displayRole = $user->status === 'approved' ? $user->role : 'employee';
-
         return response()->json([
             'success' => true,
-            'user' => [
-                'id' => $user->id,
-                'name' => $user->name,
-                'email' => $user->email,
-                'role' => $user->role,
-                'display_role' => $displayRole,
-                'status' => $user->status,
-                'created_at' => $user->created_at,
-            ]
+            'user' => new \App\Http\Resources\UserResource($user),
         ]);
     });
     Route::get('/dashboard', [AuthController::class, 'apiDashboard']);
     Route::get('/dashboard/stats', [AuthController::class, 'apiDashboardStats']);
     Route::get('/user/stats', [AuthController::class, 'apiUserStats']);
+    Route::put('/user/profile', [AuthController::class, 'apiUpdateProfile']);
+    Route::post('/user/avatar', [AuthController::class, 'apiUploadAvatar']);
+    Route::delete('/user/avatar', [AuthController::class, 'apiDeleteAvatar']);
+    Route::post('/user/change-password', [AuthController::class, 'apiChangePassword']);
     Route::post('/logout', [AuthController::class, 'apiLogout']);
 
     // 2FA routes

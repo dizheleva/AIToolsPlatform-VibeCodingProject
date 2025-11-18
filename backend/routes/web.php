@@ -120,7 +120,9 @@ Route::prefix('api')->group(function () {
             Route::post('/', [\App\Http\Controllers\AiToolController::class, 'store']);
             Route::put('/{aiTool}', [\App\Http\Controllers\AiToolController::class, 'update']);
             Route::delete('/{aiTool}', [\App\Http\Controllers\AiToolController::class, 'destroy']);
-            Route::post('/{aiTool}/like', [\App\Http\Controllers\AiToolController::class, 'toggleLike']);
+            // Rate limit like/unlike to prevent spam (10 requests per minute per user)
+            Route::post('/{aiTool}/like', [\App\Http\Controllers\AiToolController::class, 'toggleLike'])
+                ->middleware('throttle:10,1');
         });
 
         // Categories protected routes

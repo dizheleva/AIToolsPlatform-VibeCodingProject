@@ -5,11 +5,16 @@ namespace App\Http\Controllers;
 use App\Models\AiTool;
 use App\Models\Category;
 use App\Services\ActivityLogService;
+use App\Http\Requests\StoreAiToolRequest;
+use App\Http\Requests\UpdateAiToolRequest;
+use App\Http\Resources\AiToolResource;
+use App\Jobs\IncrementToolViews;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Str;
 
 class AiToolController extends Controller
@@ -81,7 +86,7 @@ class AiToolController extends Controller
 
         return response()->json([
             'success' => true,
-            'data' => $tools->items(),
+            'data' => AiToolResource::collection($tools->items()),
             'pagination' => [
                 'current_page' => $tools->currentPage(),
                 'last_page' => $tools->lastPage(),
@@ -94,7 +99,7 @@ class AiToolController extends Controller
     /**
      * Store a newly created AI tool.
      */
-    public function store(Request $request, ActivityLogService $activityLogService): JsonResponse
+    public function store(StoreAiToolRequest $request, ActivityLogService $activityLogService): JsonResponse
     {
         $user = Auth::user();
 
@@ -106,31 +111,16 @@ class AiToolController extends Controller
             ], 401);
         }
 
-        // Check if user is approved
-        if ($user->status !== 'approved') {
+        // Check authorization using Policy
+        if (!Gate::allows('create', AiTool::class)) {
             return response()->json([
                 'success' => false,
                 'message' => 'Your account must be approved to create AI tools.',
             ], 403);
         }
 
-        $validated = $request->validate([
-            'name' => 'required|string|max:255',
-            'description' => 'nullable|string',
-            'short_description' => 'nullable|string|max:500',
-            'url' => 'required|url|max:500',
-            'logo_url' => 'nullable|url|max:500',
-            'pricing_model' => 'required|in:free,freemium,paid,enterprise',
-            'status' => 'nullable|in:active,inactive,pending_review',
-            'featured' => 'nullable|boolean',
-            'category_ids' => 'nullable|array',
-            'category_ids.*' => 'exists:categories,id',
-            'roles' => 'nullable|array',
-            'roles.*' => 'in:backend,frontend,qa,pm,designer',
-            'tags' => 'nullable|array',
-            'documentation_url' => 'nullable|url|max:500',
-            'github_url' => 'nullable|url|max:500',
-        ]);
+        // Get validated data from Form Request
+        $validated = $request->validated();
 
         // Use transaction to ensure data consistency
         $tool = DB::transaction(function () use ($validated, $user) {
@@ -186,7 +176,7 @@ class AiToolController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'AI tool created successfully.',
-            'data' => $tool,
+            'data' => new AiToolResource($tool),
         ], 201);
     }
 
@@ -195,9 +185,9 @@ class AiToolController extends Controller
      */
     public function show(AiTool $aiTool): JsonResponse
     {
-        // Increment views - use direct DB increment for better performance
-        // This avoids loading the model into memory just to increment
-        DB::table('ai_tools')->where('id', $aiTool->id)->increment('views_count');
+        // Increment views asynchronously using queue job for better performance
+        // This prevents blocking the request and improves response time
+        IncrementToolViews::dispatch($aiTool->id);
 
         $aiTool->load(['creator', 'updater', 'categories', 'toolRoles']);
 
@@ -207,20 +197,19 @@ class AiToolController extends Controller
             $isLiked = $aiTool->likedBy()->where('user_id', Auth::id())->exists();
         }
 
-        // Add is_liked to the response
-        $data = $aiTool->toArray();
-        $data['is_liked'] = $isLiked;
+        // Add is_liked to the resource
+        $aiTool->is_liked = $isLiked;
 
         return response()->json([
             'success' => true,
-            'data' => $data,
+            'data' => new AiToolResource($aiTool),
         ]);
     }
 
     /**
      * Update the specified AI tool.
      */
-    public function update(Request $request, AiTool $aiTool, ActivityLogService $activityLogService): JsonResponse
+    public function update(UpdateAiToolRequest $request, AiTool $aiTool, ActivityLogService $activityLogService): JsonResponse
     {
         $user = Auth::user();
 
@@ -232,12 +221,8 @@ class AiToolController extends Controller
             ], 401);
         }
 
-        // Check permissions: only owner or creator can update
-        // Owner can always update, creator can update their own tools if approved
-        $isOwner = $user->role === 'owner' && $user->status === 'approved';
-        $isCreator = $aiTool->created_by === $user->id && $user->status === 'approved';
-
-        if (!$isOwner && !$isCreator) {
+        // Check authorization using Policy
+        if (!Gate::allows('update', $aiTool)) {
             return response()->json([
                 'success' => false,
                 'message' => 'You do not have permission to update this tool.',
@@ -246,23 +231,8 @@ class AiToolController extends Controller
 
         $oldValues = $aiTool->toArray();
 
-        $validated = $request->validate([
-            'name' => 'sometimes|required|string|max:255',
-            'description' => 'nullable|string',
-            'short_description' => 'nullable|string|max:500',
-            'url' => 'sometimes|required|url|max:500',
-            'logo_url' => 'nullable|url|max:500',
-            'pricing_model' => 'sometimes|required|in:free,freemium,paid,enterprise',
-            'status' => 'nullable|in:active,inactive,pending_review',
-            'featured' => 'nullable|boolean',
-            'category_ids' => 'nullable|array',
-            'category_ids.*' => 'exists:categories,id',
-            'roles' => 'nullable|array',
-            'roles.*' => 'in:backend,frontend,qa,pm,designer',
-            'tags' => 'nullable|array',
-            'documentation_url' => 'nullable|url|max:500',
-            'github_url' => 'nullable|url|max:500',
-        ]);
+        // Get validated data from Form Request
+        $validated = $request->validated();
 
         // Use transaction to ensure data consistency
         DB::transaction(function () use ($validated, $aiTool, $user) {
@@ -278,8 +248,8 @@ class AiToolController extends Controller
                 $validated['slug'] = $slug;
             }
 
-            // Only owners can change status and featured
-            if ($user->role !== 'owner' || $user->status !== 'approved') {
+            // Only owners can change status and featured (using Policy)
+            if (!Gate::allows('manageStatus', $aiTool)) {
                 unset($validated['status'], $validated['featured']);
             }
 
@@ -309,7 +279,7 @@ class AiToolController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'AI tool updated successfully.',
-            'data' => $aiTool,
+            'data' => new AiToolResource($aiTool),
         ]);
     }
 
@@ -328,12 +298,8 @@ class AiToolController extends Controller
             ], 401);
         }
 
-        // Check permissions: only owner or creator can delete
-        // Owner can always delete, creator can delete their own tools if approved
-        $isOwner = $user->role === 'owner' && $user->status === 'approved';
-        $isCreator = $aiTool->created_by === $user->id && $user->status === 'approved';
-
-        if (!$isOwner && !$isCreator) {
+        // Check authorization using Policy
+        if (!Gate::allows('delete', $aiTool)) {
             return response()->json([
                 'success' => false,
                 'message' => 'You do not have permission to delete this tool.',
@@ -405,31 +371,52 @@ class AiToolController extends Controller
     /**
      * Clear tools-related cache keys.
      * Instead of flushing all cache, we clear only relevant keys.
+     * Uses cache tags if Redis is configured, otherwise clears common keys.
      */
     private function clearToolsCache(): void
     {
-        // Clear common cache patterns
-        // Note: This is a simplified approach. For production, consider using cache tags if available
-        $patterns = [
-            'tools_count_*',
-        ];
+        $cacheDriver = config('cache.default');
 
-        // Since Laravel doesn't support wildcard deletion by default,
-        // we'll clear the most common cache keys
-        // In production with Redis, you could use SCAN to find and delete matching keys
-        // For now, we'll clear a reasonable set of common filter combinations
+        // If using Redis, try to use cache tags for more efficient clearing
+        if ($cacheDriver === 'redis' && method_exists(Cache::getStore(), 'tags')) {
+            try {
+                Cache::tags(['ai_tools'])->flush();
+                return;
+            } catch (\Exception $e) {
+                // If tags are not supported, fall back to manual clearing
+                \Log::warning('Cache tags not available, falling back to manual cache clearing');
+            }
+        }
+
+        // Manual cache clearing for other drivers or if tags fail
+        // Clear common filter combinations
         $commonFilters = [
             [],
             ['status' => 'active'],
             ['status' => 'inactive'],
             ['status' => 'pending_review'],
             ['featured' => true],
+            ['featured' => false],
+            // Common category filters
+            ['category_id' => 1],
+            ['category_id' => 2],
+            ['category_id' => 3],
+            // Common role filters
+            ['role' => 'backend'],
+            ['role' => 'frontend'],
+            ['role' => 'qa'],
+            ['role' => 'pm'],
+            ['role' => 'designer'],
         ];
 
         foreach ($commonFilters as $filters) {
             $cacheKey = 'tools_count_' . md5(json_encode($filters));
             Cache::forget($cacheKey);
         }
+
+        // Also clear categories cache if it exists
+        Cache::forget('categories_list_' . md5(json_encode([])));
+        Cache::forget('categories_list_' . md5(json_encode(['active' => true])));
     }
 }
 
